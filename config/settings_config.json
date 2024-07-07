@@ -1,0 +1,7 @@
+{
+    "python_exe": "D:/ai_projects/ai_misc/venv39/Scripts/python.exe",
+    "cache_dir": "D:/ai_projects/ai_misc",
+    "output_dir": "/u/mahy/nuke-stable-diffusion",
+    "pre_cmd": "bob-world -t python3.9",
+    "post_cmd": ""
+}
