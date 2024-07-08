@@ -8,17 +8,13 @@ from sklearn.cluster import DBSCAN
 
 
 class PointCloudProcessor:
-    def __init__(self, points: np.array, eps: float = 0.5, min_samples: int = 10, k: int = 20,
-                 iqr_multiplier: float = 1.5, uvs=None):
+    def __init__(self, points: np.array, uvs=None):
         """
         Initialize the PointCloudProcessor with a set of points and cleaning parameters.
 
         Parameters:
             points (np.array): xyz The array of points to process.
-            eps (float): The maximum distance between two samples for one to be considered as in the neighborhood of the other. Used in DBSCAN.
-            min_samples (int): The number of samples in a neighborhood for a point to be considered a core point. Used in DBSCAN.
-            k (int): The number of nearest neighbors to consider for dynamic spike removal.
-            iqr_multiplier (float): Multiplier for the interquartile range to set dynamic spike removal threshold.
+            uvs (np.array): The UV coordinates for each point.
         """
 
         self.points = points
@@ -26,11 +22,6 @@ class PointCloudProcessor:
         self.min_x, self.min_y = np.min(self.clean_points, axis=0)[:2]
         self.max_x, self.max_y = np.max(self.clean_points, axis=0)[:2]
         self.uvs = uvs if uvs is not None else self.generate_uvs_from_points()
-
-        self.eps = eps
-        self.min_samples = min_samples
-        self.k = k
-        self.iqr_multiplier = iqr_multiplier
 
     def generate_uvs_from_points(self, recalculate_range=False):
         """
@@ -68,25 +59,29 @@ class PointCloudProcessor:
             for f in faces:
                 file.write(f"f {f[0] + 1}/{f[0] + 1} {f[1] + 1}/{f[1] + 1} {f[2] + 1}/{f[2] + 1}\n")
 
-    def remove_spikes_dynamic(self):
+    def remove_spikes_dynamic(self, iqr_multiplier=1.5, k=30):
         """
         Dynamically remove spikes from the point cloud based on the statistical properties of nearest neighbor distances.
+        @param iqr_multiplier: Multiplier for the IQR to set threshold for spike removal.
+        @param k: Number of nearest neighbors to consider for each point.
         """
         tree = cKDTree(self.clean_points)
-        distances, _ = tree.query(self.clean_points, k=self.k + 1)
+        distances, _ = tree.query(self.clean_points, k=k + 1)
         mean_distances = np.mean(distances[:, 1:], axis=1)
         dist_iqr = iqr(mean_distances)
-        threshold = np.median(mean_distances) + dist_iqr * self.iqr_multiplier
+        threshold = np.median(mean_distances) + dist_iqr * iqr_multiplier
         valid_indices = mean_distances < threshold
         self.clean_points = self.clean_points[valid_indices]
         self.uvs = self.uvs[valid_indices]
 
-    def enhanced_cleaning(self):
+    def enhanced_cleaning(self, min_samples=10, eps=0.5):
         """
         Apply enhanced cleaning strategies using DBSCAN to remove isolated or stretched points.
+        @param min_samples: The minimum number of samples required to form a cluster.
+        @param eps: The maximum distance between two samples for one to be considered as in the neighborhood of the other.
         """
         points_2d = np.delete(self.clean_points, 1, axis=1)
-        clustering = DBSCAN(eps=self.eps, min_samples=self.min_samples).fit(points_2d)
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(points_2d)
         labels = clustering.labels_
         valid_indices = labels != -1
         self.clean_points = self.clean_points[valid_indices]
@@ -106,7 +101,6 @@ class PointCloudProcessor:
         """
         # Get the height and width from the size tuple
         height, width = size
-        print('size', height, width)
         y_indices, x_indices = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
 
         # Normalize these coordinates to the range [0, 1]
@@ -124,25 +118,27 @@ class PointsToGeoExecutor(BaseExecutor):
 
     def setup_parser(self):
         super().setup_parser()
-        self.parser.add_argument('--enhanced-cleaning', type=bool, default=False,
-                                 help='Apply enhanced cleaning using DBSCAN.')
-        self.parser.add_argument('--remove-spikes', type=bool, default=False,
-                                 help='Remove dynamic spikes from the point cloud.')
-        self.parser.add_argument('--eps', type=float, default=0.5, help='DBSCAN eps parameter.')
-        self.parser.add_argument('--min-samples', type=int, default=10, help='DBSCAN min_samples parameter.')
-        self.parser.add_argument('--k', type=int, default=20, help='Number of nearest neighbors for spike removal.')
-        self.parser.add_argument('--iqr-multiplier', type=float, default=1.5,
-                                 help='Multiplier for the IQR to set threshold for spike removal.')
+        self.remove_argument('--output')
+        self.parser.add_argument('--output_geo', required=True, help='output path')
 
     def run(self):
         self.logger.info(f"Running {self.__class__.__name__} with arguments: {dict_to_string(self.args_dict)}")
-        input_filename_pattern = self.args_dict['input']
-        output_filename_pattern = self.args_dict['output']
+        input_filename_pattern = self.args_dict['inputs']['positions']
+        output_filename_pattern = self.args_dict['output_geo']
         frame_range = range(self.frame_range[0], self.frame_range[-1] + 1)
 
         output_dir = os.path.dirname(output_filename_pattern)
         os.makedirs(output_dir, exist_ok=True)
         points_list = self.imageIO.read_image(input_filename_pattern, frame_range=self.frame_range, output_format='np')
+
+        data = self.args_dict['data']
+        remove_spikes = data.get('remove_spikes', True)  # Remove dynamic spikes from the point cloud.
+        iqr_multiplier = data.get('iqr_multiplier', 1.5)  # Multiplier for the IQR to set threshold for spike removal.
+        k = data.get('k', 30) # Number of nearest neighbors to consider for each point.
+
+        enhanced_cleaning = data.get('enhanced_cleaning', True)  # Apply enhanced cleaning using DBSCAN.
+        min_samples = data.get('min_samples', 10)  # The minimum number of samples required to form a cluster.
+        eps = data.get('eps', .1)  # The maximum distance between two samples for one to be considered as in the neighborhood.
 
         for points, frame_number in self.logger.progress(zip(points_list, frame_range), desc="Processing frames:"):
             size = points.shape[:2]
@@ -150,9 +146,6 @@ class PointsToGeoExecutor(BaseExecutor):
 
             r, g, b, a = points[:, :, 0], points[:, :, 1], points[:, :, 2], points[:, :, 3]
             mask = a > 0  # Filter out points with alpha 0
-            print('mask:', mask.shape, mask.sum())
-            print('uvs:', uvs.shape)
-            print('a:', a.shape)
             # Create an array of vectors for points with alpha > 0
             points = np.vstack((r[mask], g[mask], b[mask])).T
             uvs = uvs[mask]
@@ -164,17 +157,15 @@ class PointsToGeoExecutor(BaseExecutor):
                 self.logger.warning(f"File not found: {input_filename}")
                 continue
 
-            points_processor = PointCloudProcessor(points, self.args_dict['eps'], self.args_dict['min-samples'],
-                                                   self.args_dict['k'], self.args_dict['iqr-multiplier'], uvs=uvs)
+            points_processor = PointCloudProcessor(points, uvs=uvs)
 
-            if self.args_dict['remove-spikes']:
+            if remove_spikes:
                 self.logger.info('Removing spikes.')
-                points_processor.remove_spikes_dynamic()
+                points_processor.remove_spikes_dynamic(iqr_multiplier=iqr_multiplier, k=k)
 
-            if self.args_dict['enhanced-cleaning']:
+            if enhanced_cleaning:
                 self.logger.info('Applying enhanced cleaning.')
-                points_processor.enhanced_cleaning()
-
+                points_processor.enhanced_cleaning(min_samples=min_samples, eps=eps)
 
             self.logger.info(f'Cleaned points: {points_processor.clean_points.shape[0]}')
             points_processor.export_obj(output_filename)
@@ -183,24 +174,24 @@ class PointsToGeoExecutor(BaseExecutor):
 
 if __name__ == '__main__':
     import sys
-
     skip_parser = len(sys.argv) == 1  # sys.argv includes the script name, so 1 means no additional args
     executor = PointsToGeoExecutor(skip_setup_parser=skip_parser)
     # for testing
-    executor.args_dict = {
-        'input': 'C:/Users/Femto7000/geoanything/porjection/GAI_PointCloudGen/20240704/20240704_065721/output.%04d.exr',
-        # Example pattern for input files
-        'output': 'C:/Users/Femto7000/geoanything/porjection/GAI_PointCloudGen/20240704/20240704_065721/output.%04d',
-        # Example pattern for output files
-        'enhanced-cleaning': True,
-        'remove-spikes': True,
-        'eps': 0.1,
-        'min-samples': 2,
-        'k': 20,
-        'iqr-multiplier': 1.5,
-        'frame_range': (1, 1)
-
-    }
+    # if not skip_parser:
+    #     executor.args_dict = {
+    #         'input': 'C:/Users/Femto7000/geoanything/porjection/GAI_PointCloudGen/20240704/20240704_065721/output.%04d.exr',
+    #         # Example pattern for input files
+    #         'output': 'C:/Users/Femto7000/geoanything/porjection/GAI_PointCloudGen/20240704/20240704_065721/output.%04d',
+    #         # Example pattern for output files
+    #         'enhanced-cleaning': True,
+    #         'remove-spikes': True,
+    #         'eps': 0.1,
+    #         'min-samples': 2,
+    #         'k': 30,
+    #         'iqr-multiplier': 1.5,
+    #         'frame_range': (1, 1)
+    #
+    #     }
     try:
         # Try to get the logger level from the arguments.
         lvl = int(executor.args_dict.get('logger_level', 10))
