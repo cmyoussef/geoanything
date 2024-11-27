@@ -1,4 +1,12 @@
 import os
+import sys
+
+paths = [r'E:\stable-diffusion\stable-diffusion-integrator', r'E:\track_anything_project',
+         r'E:\ai_projects\dust3r_project\vision-forge', r'E:\nuke-bridge', 'E:/ai_projects/ai_portal', r'E:\ai_projects\dust3r_project\MoGo', r'E:\ai_projects\dust3r_project\MoGo\MoGe']
+for p in paths:
+    if not p in sys.path:
+        sys.path.append(p)
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict
@@ -10,9 +18,10 @@ import trimesh
 from PIL import Image
 from torch.nn import functional as F
 
-import utils3d
-from moge.model import MoGeModel as MoGeModelBase
-from moge.utils.geometry_torch import point_map_to_depth
+from MoGe import utils3d
+from MoGe.moge.model import MoGeModel as MoGeModelBase
+from MoGe.moge.utils.geometry_torch import point_map_to_depth
+from nukebridge.utils.image_io import get_image_io
 
 # Enable EXR support in OpenCV
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
@@ -130,6 +139,7 @@ class MoGeOutput:
     sensor_width_mm: float = 36.0  # Default to full-frame sensor width
     sensor_height_mm: float = 24.0  # Default to full-frame sensor height
     shift: float = 0  # Add shift value
+    imageIO = get_image_io()
 
     def estimate_focal_length_from_frustum(self):
         """
@@ -473,22 +483,22 @@ class MoGeOutput:
         - output_path (str or Path): Path to save the depth file (relative to root_folder or absolute).
         """
         depth = self.depth
-
         # Resolve output path
         output_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
         exr_path = str(output_path.with_suffix('.exr'))
+        # depth_exr = depth.astype(np.float32)
+        self.imageIO.write_image(depth, exr_path, image_format='exr')
 
         # Ensure depth is single-channel float32
-        depth_exr = depth.astype(np.float32)
 
         # Save as EXR
         # Ensure OpenCV has EXR support enabled
-        if not cv2.haveImageWriter(exr_path):
-            raise RuntimeError(
-                "OpenCV was not built with EXR support. Please ensure OpenCV is installed with OpenEXR enabled.")
+        # if not cv2.haveImageWriter(exr_path):
+        #     raise RuntimeError(
+        #         "OpenCV was not built with EXR support. Please ensure OpenCV is installed with OpenEXR enabled.")
 
         # Save the depth map
-        cv2.imwrite(exr_path, depth_exr, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+        # cv2.imwrite(exr_path, depth_exr, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
 
     def save_point_cloud(self, output_path):
         """
@@ -608,7 +618,7 @@ class MoGeInference:
 
 if __name__ == '__main__':
     # Example usage
-    model_path = r'E:\ai_projects\dust3r_project\MoGo\model\model.pt'
+    model_path = r'/model/model.pt'
     root_folder = r'E:\ai_projects\dust3r_project\vision-forge\test\output_geo'
     inference = MoGeInference(model_path, root_folder=root_folder)
     img = r'E:\ai_projects\dust3r_project\MoGo\MoGe\example_images\BooksCorridor.png'
@@ -628,7 +638,7 @@ if __name__ == '__main__':
     # Save outputs directly from the output object
     output.save_mesh('meshes/mesh_filename', file_format='obj', remove_edge=True, rtol=0.02)
     output.save_camera_nuke('nuke_camera/camera')
-
+    output.save_depth_map('depth_map/depth_map')
     # Save the frustum as OBJ
     # output.save_frustum_as_obj('frustum/frustum_mesh')
 

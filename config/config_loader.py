@@ -12,6 +12,7 @@ class ConfigLoader(Base_ConfigLoader):
         self.script_paths['PointToGeo'] = os.path.join(self.project_directory, 'executors', 'pointstogeoexecutor.py')
         self.script_paths['PointCloudVisualizer'] = os.path.join(self.project_directory, 'executors', 'pointcloudvisualizer.py')
         self.script_paths['FocalLengthEstimator'] = os.path.join(self.project_directory, 'executors', 'estimate_focal_length.py')
+        self.script_paths['MoGe'] = os.path.join(self.project_directory, 'executors', 'mogeexecutor.py')
 
 
     @property
