@@ -1,7 +1,8 @@
 import os
 
 import nuke
-from nukebridge.gizmos.core.baselive import BaseLive, Icons, SocketClient
+from nukebridge.gizmos.core.baselive import BaseLive, Icons
+from PyServerManager.async_server.async_pickle_client import AsyncPickleClient as SocketClient
 
 from geoanything.config.config_loader import ConfigLoader
 

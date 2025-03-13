@@ -1,128 +1,35 @@
 import os
 import sys
 
-paths = [r'E:\stable-diffusion\stable-diffusion-integrator', r'E:\track_anything_project',
-         r'E:\ai_projects\dust3r_project\vision-forge', r'E:\nuke-bridge', 'E:/ai_projects/ai_portal', r'E:\ai_projects\dust3r_project\MoGo', r'E:\ai_projects\dust3r_project\MoGo\MoGe']
+# You can keep or remove these paths additions if needed in your environment
+paths = [
+    r'E:\stable-diffusion\stable-diffusion-integrator',
+    r'E:\track_anything_project',
+    r'E:\ai_projects\dust3r_project\vision-forge',
+    r'E:\nuke-bridge',
+    'E:/ai_projects/ai_portal',
+    r'E:\ai_projects\dust3r_project\MoGo',
+    r'E:\ai_projects\dust3r_project\MoGo\MoGe'
+]
 for p in paths:
-    if not p in sys.path:
+    if p not in sys.path:
         sys.path.append(p)
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, Dict
-
-import cv2  # For EXR support
 import numpy as np
 import torch
 import trimesh
+from dataclasses import dataclass
+from pathlib import Path
 from PIL import Image
-from torch.nn import functional as F
+from typing import Optional
 
+# From your original code/repo
 from MoGe import utils3d
-from MoGe.moge.model import MoGeModel as MoGeModelBase
-from MoGe.moge.utils.geometry_torch import point_map_to_depth
+from MoGe.moge.model import MoGeModel
 from nukebridge.utils.image_io import get_image_io
 
 # Enable EXR support in OpenCV
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
-
-
-class MoGeModel(MoGeModelBase):
-    """
-    MoGe model class with additional methods for inference.
-    """
-
-    @torch.inference_mode()
-    def infer(
-            self,
-            image: torch.Tensor,
-            force_projection: bool = True,
-            resolution_level: int = 9,
-            apply_mask: bool = True,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        User-friendly inference function
-
-        ### Parameters
-        - `image`: input image tensor of shape (B, 3, H, W) or (3, H, W)
-        - `resolution_level`: the resolution level to use for the output point map in 0-9. Default: 9 (highest)
-        - `interpolation_mode`: interpolation mode for the output points map. Default: 'bilinear'.
-
-        ### Returns
-
-        A dictionary containing the following keys:
-        - `points`: output tensor of shape (B, H, W, 3) or (H, W, 3).
-        - `depth`: tensor of shape (B, H, W) or (H, W) containing the depth map.
-        - `intrinsics`: tensor of shape (B, 3, 3) or (3, 3) containing the camera intrinsics.
-        """
-        if image.dim() == 3:
-            omit_batch_dim = True
-            image = image.unsqueeze(0)
-        else:
-            omit_batch_dim = False
-
-        original_height, original_width = image.shape[-2:]
-        area = original_height * original_width
-
-        min_area, max_area = self.trained_area_range
-        expected_area = min_area + (max_area - min_area) * (resolution_level / 9)
-
-        if expected_area != area:
-            expected_width, expected_height = int(original_width * (expected_area / area) ** 0.5), int(
-                original_height * (expected_area / area) ** 0.5)
-            image = F.interpolate(image, (expected_height, expected_width), mode="bicubic", align_corners=False,
-                                  antialias=True)
-
-        output = self.forward(image)
-        points, mask = output['points'], output.get('mask', None)
-
-        # Get camera-origin-centered point map
-        depth, fov_x, fov_y, z_shift = point_map_to_depth(points, None if mask is None else mask > 0.5)
-        intrinsics = utils3d.torch.intrinsics_from_fov_xy(fov_x, fov_y)
-
-        # If projection constraint is forces, recompute the point map using the actual depth map
-        if force_projection:
-            points = utils3d.torch.unproject_cv(
-                utils3d.torch.image_uv(width=expected_width, height=expected_height, dtype=points.dtype,
-                                       device=points.device), depth, extrinsics=None,
-                intrinsics=intrinsics[..., None, :, :])
-        else:
-            points = points + torch.stack([torch.zeros_like(z_shift), torch.zeros_like(z_shift), z_shift], dim=-1)[...,
-                              None, None, :]
-
-        # Resize the output to the original resolution
-        if expected_area != area:
-            points = F.interpolate(points.permute(0, 3, 1, 2), (original_height, original_width), mode='bilinear',
-                                   align_corners=False, antialias=False).permute(0, 2, 3, 1)
-            depth = F.interpolate(depth.unsqueeze(1), (original_height, original_width), mode='bilinear',
-                                  align_corners=False, antialias=False).squeeze(1)
-            mask = None if mask is None else F.interpolate(mask.unsqueeze(1), (original_height, original_width),
-                                                           mode='bilinear', align_corners=False,
-                                                           antialias=False).squeeze(1)
-
-        # Apply mask if needed
-        if self.output_mask and apply_mask:
-            mask_binary = (depth > 0) & (mask > 0.5)
-            points = torch.where(mask_binary[..., None], points, torch.inf)
-            depth = torch.where(mask_binary, depth, torch.inf)
-
-        if omit_batch_dim:
-            points = points.squeeze(0)
-            intrinsics = intrinsics.squeeze(0)
-            depth = depth.squeeze(0)
-            if self.output_mask:
-                mask = mask.squeeze(0)
-
-        return_dict = {
-            'points': points,
-            'intrinsics': intrinsics,
-            'depth': depth,
-            'shift': z_shift
-        }
-        if self.output_mask:
-            return_dict['mask'] = mask > 0.5
-
-        return return_dict
 
 
 @dataclass
@@ -136,45 +43,46 @@ class MoGeOutput:
     intrinsics: np.ndarray  # Shape: (3, 3)
     image: np.ndarray  # Original input image (H, W, 3)
     root_folder: Path  # Root folder for saving outputs
-    sensor_width_mm: float = 36.0  # Default to full-frame sensor width
-    sensor_height_mm: float = 24.0  # Default to full-frame sensor height
-    shift: float = 0  # Add shift value
+
+    sensor_width_mm: float = 36.0
+    sensor_height_mm: float = 24.0
+    shift: float = 0
+
     imageIO = get_image_io()
 
     def estimate_focal_length_from_frustum(self):
         """
         Estimates the focal length based on the frustum dimensions.
-
         Returns:
-        - focal_length_x_px: Estimated focal length along the X-axis in pixels.
-        - focal_length_y_px: Estimated focal length along the Y-axis in pixels.
+        - focal_length_x_px: Estimated focal length (X) in pixels
+        - focal_length_y_px: Estimated focal length (Y) in pixels
         """
         # Get image dimensions
         image_height, image_width = self.image.shape[:2]
 
-        # Get sensor dimensions
+        # Sensor dimensions
         sensor_width_mm = self.sensor_width_mm
         sensor_height_mm = self.sensor_height_mm
 
-        # Get the near face vertices
+        # Get near face
         _, near_face_vertices = self.get_camera_frustum_faces()
 
-        # Compute the width and height of the near face
+        # Width/height of the near face
         W_near = np.linalg.norm(near_face_vertices[0, :2] - near_face_vertices[3, :2])
         H_near = np.linalg.norm(near_face_vertices[0, :2] - near_face_vertices[1, :2])
 
-        # Distance from camera to near plane (since camera is at z = -shift)
+        # Distance from camera to near plane
         z_near = near_face_vertices[0, 2] + self.shift
 
-        # Compute field of view angles
+        # Field of view angles
         theta_x = 2 * np.arctan((W_near / 2) / z_near)
         theta_y = 2 * np.arctan((H_near / 2) / z_near)
 
-        # Compute focal lengths in millimeters
+        # Focal lengths in mm
         focal_length_x_mm = (sensor_width_mm / 2) / np.tan(theta_x / 2)
         focal_length_y_mm = (sensor_height_mm / 2) / np.tan(theta_y / 2)
 
-        # Convert focal lengths to pixels
+        # Convert mm -> px
         focal_length_x_px = focal_length_x_mm * (image_width / sensor_width_mm)
         focal_length_y_px = focal_length_y_mm * (image_height / sensor_height_mm)
 
@@ -185,15 +93,8 @@ class MoGeOutput:
 
     def get_face_at_depth(self, depth_percentage=100.0, depth_tolerance=5.0):
         """
-        Computes the face of the point cloud in the XY plane at the specified depth percentage,
-        considering a depth tolerance to create a slice.
-
-        Parameters:
-        - depth_percentage (float): A value between 0 and 100 representing the depth percentage.
-        - depth_tolerance (float): A value between 0 and 100 representing the tolerance percentage.
-
-        Returns:
-        - face_vertices (np.ndarray): An array of four vertices defining the face at the specified depth.
+        Computes a face in XY plane at the specified depth percentage,
+        with some tolerance to create a slice.
         """
         if not (0 <= depth_percentage <= 100):
             raise ValueError("depth_percentage must be between 0 and 100.")
@@ -201,98 +102,67 @@ class MoGeOutput:
         if not (0 <= depth_tolerance <= 100):
             raise ValueError("depth_tolerance must be between 0 and 100.")
 
-        # Compute the minimum and maximum Z values
-        z_min = np.min(self.points[:, :, 2])  # Nearest point
-        z_max = np.max(self.points[:, :, 2])  # Furthest point
+        # Min/max Z
+        z_min = np.min(self.points[:, :, 2])
+        z_max = np.max(self.points[:, :, 2])
 
-        # Calculate the depth Z value at the specified percentage
+        # Depth Z at specified percentage
         depth_z = z_min + (depth_percentage / 100.0) * (z_max - z_min)
 
-        # Calculate the depth tolerance in Z units
+        # Depth tolerance
         delta_z = (depth_tolerance / 100.0) * (z_max - z_min)
-
-        # Define the depth range
         depth_min = depth_z - delta_z
         depth_max = depth_z + delta_z
 
-        # Flatten points and select those within the depth range
+        # Select points in that Z range
         points_flat = self.points.reshape(-1, 3)
         within_depth = (points_flat[:, 2] >= depth_min) & (points_flat[:, 2] <= depth_max)
-
         depth_points = points_flat[within_depth]
-
         if depth_points.size == 0:
             raise ValueError("No points found within the specified depth range.")
 
-        # Compute the maximum absolute X and Y values within the depth slice
+        # Compute bounding box in X/Y
         max_abs_x = np.max(np.abs(depth_points[:, 0]))
         max_abs_y = np.max(np.abs(depth_points[:, 1]))
 
-        # Construct the face vertices symmetrically around the origin
+        # Construct a face
         face_vertices = np.array([
             [max_abs_x, max_abs_y, depth_z],
             [max_abs_x, -max_abs_y, depth_z],
             [-max_abs_x, -max_abs_y, depth_z],
             [-max_abs_x, max_abs_y, depth_z],
         ])
-
         return face_vertices
 
     def get_camera_frustum_faces(self, step=2, depth_tolerance=0.5):
         """
-        Generates the near and far faces of the camera frustum based on the point cloud.
-
-        Parameters:
-        - step (int): The step size for depth percentages (default is 2).
-        - depth_tolerance (float): The tolerance percentage for depth slicing (default is 0.5).
-
-        Returns:
-        - far_face_vertices (np.ndarray): Vertices of the far face of the frustum.
-        - near_face_vertices (np.ndarray): Vertices of the near face of the frustum.
+        Generates near/far faces of the frustum based on the point cloud.
         """
-        # Get absolute Z values
         abs_z = np.abs(self.points[:, :, 2])
         z_min, z_max = np.min(abs_z), np.max(abs_z)
-
-        # Initialize lists to store scaled vertices
         scaled_vertices_list = []
 
-        # Loop through depth percentages
         for depth_percentage in range(0, 101, step):
             try:
-                # Get the face vertices at the specified depth
                 face_vertices = self.get_face_at_depth(depth_percentage, depth_tolerance)
-
-                # Scale the vertices based on the depth percentage
                 plan_depth = np.abs(face_vertices[0, 2])
                 scale_factor = z_max / plan_depth if plan_depth != 0 else 1.0
 
-                # Scale the vertices from the origin
                 scaled_vertices = face_vertices.copy()
                 scaled_vertices[:, 0] *= scale_factor
                 scaled_vertices[:, 1] *= scale_factor
-
-                # Collect the scaled vertices
                 scaled_vertices_list.append(scaled_vertices)
-
-            except ValueError as e:
-                # Handle cases where no points are found at the depth
+            except ValueError:
                 continue
 
         if not scaled_vertices_list:
             raise ValueError("No valid faces were generated for the frustum.")
 
-        # Combine all scaled vertices into one array
         all_scaled_vertices = np.vstack(scaled_vertices_list)
-
-        # Compute the maximum absolute X and Y values among all scaled vertices
         max_abs_x = np.max(np.abs(all_scaled_vertices[:, 0]))
         max_abs_y = np.max(np.abs(all_scaled_vertices[:, 1]))
 
-        # Use the furthest Z value (z_max) for the far plane
         z_far = z_max
-
-        # Construct the far face vertices
         far_face_vertices = np.array([
             [max_abs_x, max_abs_y, z_far],
             [max_abs_x, -max_abs_y, z_far],
@@ -300,8 +170,8 @@ class MoGeOutput:
             [-max_abs_x, max_abs_y, z_far],
         ])
 
-        # Construct the near face vertices using the ratio of z_min to z_max
-        z_near = z_min if z_min != 0 else 0.001  # Avoid division by zero
+        # Near face
+        z_near = z_min if z_min != 0 else 0.001
         scale_ratio = z_near / z_far
         near_face_vertices = far_face_vertices.copy()
         near_face_vertices[:, 0] *= scale_ratio
@@ -312,73 +182,53 @@ class MoGeOutput:
 
     def save_frustum_as_obj(self, output_path):
         """
-        Generates the camera frustum mesh and saves it as an OBJ file.
-
-        Parameters:
-        - output_path (str or Path): Path to save the OBJ file.
+        Generates camera frustum mesh and saves it as OBJ.
         """
-        # Get the near and far face vertices
         far_face_vertices, near_face_vertices = self.get_camera_frustum_faces()
-
-        # Combine vertices
         vertices = np.vstack((near_face_vertices, far_face_vertices))
 
-        # Flip the Z-axis to correct orientation
+        # Flip Z
         vertices[:, 2] *= -1
 
-        # Define faces (using zero-based indexing)
         faces = np.array([
             [0, 1, 2], [0, 2, 3],  # Near face
             [4, 5, 6], [4, 6, 7],  # Far face
-            [0, 1, 5], [0, 5, 4],  # Side faces
+            [0, 1, 5], [0, 5, 4],
             [1, 2, 6], [1, 6, 5],
             [2, 3, 7], [2, 7, 6],
             [3, 0, 4], [3, 4, 7],
         ])
-
-        # Reverse the face vertex order to correct normals
         faces = faces[:, ::-1]
-
-        # Create a Trimesh object
         frustum_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
-        # Save the frustum as OBJ
         output_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
         output_path = output_path.with_suffix('.obj')
         output_path.parent.mkdir(parents=True, exist_ok=True)
         frustum_mesh.export(str(output_path))
-
         print(f"Frustum saved to {output_path}")
 
     def get_camera_parameters(self):
         """
-        Compute camera parameters including focal lengths in mm and adjusted position and rotation.
-
-        Returns:
-        - camera_params (dict): Dictionary containing focal lengths in mm, position, rotation, and sensor size.
+        Compute camera parameters in mm, position, rotation.
         """
-        # Estimate focal lengths using the frustum
         focal_length_x_px, focal_length_y_px = self.estimate_focal_length_from_frustum()
-
-        # Get image dimensions
         image_height, image_width = self.image.shape[:2]
         c_x = image_width / 2
         c_y = image_height / 2
 
-        # Update intrinsics matrix
+        # Update intrinsics
         self.intrinsics = np.array([
             [focal_length_x_px, 0, c_x],
             [0, focal_length_y_px, c_y],
             [0, 0, 1]
         ])
 
-        # Convert focal lengths to millimeters
+        # Convert px -> mm
         focal_length_x_mm = focal_length_x_px * (self.sensor_width_mm / image_width)
         focal_length_y_mm = focal_length_y_px * (self.sensor_height_mm / image_height)
 
-        # Camera position (no rotation needed)
         position = np.array([0.0, 0.0, 0.0])
-        rotation = np.array([0.0, 0.0, 0.0])  # No rotation
+        rotation = np.array([0.0, 0.0, 0.0])
 
         camera_params = {
             'focal_length_x_mm': focal_length_x_mm,
@@ -392,32 +242,22 @@ class MoGeOutput:
 
     def get_camera_data(self):
         """
-        Extract camera data such as focal lengths and field of view from intrinsics.
-
-        Returns:
-        - camera_data (dict): Dictionary containing focal lengths and FOV.
+        Extract focal lengths & FOV from intrinsics.
         """
         fov_x, fov_y = utils3d.numpy.intrinsics_to_fov(self.intrinsics)
         focal_length_x = self.intrinsics[0, 0]
         focal_length_y = self.intrinsics[1, 1]
 
-        camera_data = {
+        return {
             'fov_x': np.rad2deg(fov_x),
             'fov_y': np.rad2deg(fov_y),
             'focal_length_x': focal_length_x,
-            'focal_length_y': focal_length_y,
+            'focal_length_y': focal_length_y
         }
-        return camera_data
 
     def save_mesh(self, output_path, file_format='ply', remove_edge=True, rtol=0.02):
         """
-        Create a mesh from points and save it as a PLY or OBJ file.
-
-        Parameters:
-        - output_path (str or Path): Path to save the mesh file (relative to root_folder or absolute).
-        - file_format (str): File format for the mesh ('ply' or 'obj').
-        - remove_edge (bool): Whether to remove edge points based on depth discontinuities.
-        - rtol (float): Relative tolerance for edge removal.
+        Create a mesh from points, optionally remove edges, and save.
         """
         points = self.points
         image = self.image
@@ -426,10 +266,9 @@ class MoGeOutput:
         height, width = image.shape[:2]
 
         # Resolve output path
-        output_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
-        output_path = output_path.with_suffix(f'.{file_format}')
+        out_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
+        out_path = out_path.with_suffix(f'.{file_format}')
 
-        # Prepare mask
         if mask is None:
             mask = np.ones((height, width), dtype=bool)
 
@@ -439,7 +278,7 @@ class MoGeOutput:
             edge_mask = ~utils3d.numpy.depth_edge(depth, mask=mask, rtol=rtol)
             mask = mask & edge_mask
 
-        # Generate mesh
+        # Build mesh
         faces, vertices, vertex_colors, vertex_uvs = utils3d.numpy.image_mesh(
             points,
             image.astype(np.float32) / 255.0,
@@ -448,10 +287,10 @@ class MoGeOutput:
             tri=True
         )
 
-        # Adjust coordinates and UVs
+        # Flip coordinates for standard axes & UV
         vertices, vertex_uvs = vertices * [1, -1, -1], vertex_uvs * [1, -1] + [0, 1]
 
-        # Create Trimesh object
+        # Trimesh object
         if file_format.lower() == 'ply':
             mesh = trimesh.Trimesh(
                 vertices=vertices,
@@ -460,7 +299,7 @@ class MoGeOutput:
                 process=False
             )
         else:
-            # For OBJ or other formats, use texture mapping
+            # e.g. OBJ with texture
             mesh = trimesh.Trimesh(
                 vertices=vertices,
                 faces=faces,
@@ -471,72 +310,42 @@ class MoGeOutput:
                 process=False
             )
 
-        # Save mesh
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        mesh.export(str(output_path))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh.export(str(out_path))
 
     def save_depth_map(self, output_path):
         """
-        Save the raw depth map as an EXR file.
-
-        Parameters:
-        - output_path (str or Path): Path to save the depth file (relative to root_folder or absolute).
+        Save depth map as EXR.
         """
-        depth = self.depth
-        # Resolve output path
-        output_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
-        exr_path = str(output_path.with_suffix('.exr'))
-        # depth_exr = depth.astype(np.float32)
-        self.imageIO.write_image(depth, exr_path, image_format='exr')
-
-        # Ensure depth is single-channel float32
-
-        # Save as EXR
-        # Ensure OpenCV has EXR support enabled
-        # if not cv2.haveImageWriter(exr_path):
-        #     raise RuntimeError(
-        #         "OpenCV was not built with EXR support. Please ensure OpenCV is installed with OpenEXR enabled.")
-
-        # Save the depth map
-        # cv2.imwrite(exr_path, depth_exr, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+        out_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
+        exr_path = str(out_path.with_suffix('.exr'))
+        self.imageIO.write_image(self.depth, exr_path, image_format='exr')
 
     def save_point_cloud(self, output_path):
         """
         Save the point cloud as a PLY file.
-
-        Parameters:
-        - output_path (str or Path): Path to save the point cloud file (relative to root_folder or absolute).
         """
         points = self.points
         mask = self.mask
 
-        # Resolve output path
-        output_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
-        output_path = output_path.with_suffix('.ply')
+        out_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
+        out_path = out_path.with_suffix('.ply')
 
-        # Flatten points and apply mask
         valid_points = points[mask] if mask is not None else points.reshape(-1, 3)
-
-        # Create Trimesh PointCloud
-        point_cloud = trimesh.PointCloud(valid_points)
-
-        # Save point cloud
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        point_cloud.export(str(output_path))
+        pc = trimesh.PointCloud(valid_points)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pc.export(str(out_path))
 
     def save_camera_nuke(self, output_path):
         """
-        Save camera parameters to a Nuke script file (.nk)
-
-        Parameters:
-        - output_path (str or Path): Path to save the Nuke script (relative to root_folder or absolute).
+        Save camera parameters as a Nuke .nk file.
         """
-        camera_params = self.get_camera_parameters()
-        focal_length_mm = camera_params['focal_length_x_mm']
-        haperture_mm = camera_params['sensor_width_mm']
-        vaperture_mm = camera_params['sensor_height_mm']
-        position = camera_params['position']
-        rotation = camera_params['rotation']
+        cam_params = self.get_camera_parameters()
+        focal_length_mm = cam_params['focal_length_x_mm']
+        haperture_mm = cam_params['sensor_width_mm']
+        vaperture_mm = cam_params['sensor_height_mm']
+        position = cam_params['position']
+        rotation = cam_params['rotation']
 
         camera_nk_content = f"""
 Camera2 {{
@@ -549,58 +358,97 @@ Camera2 {{
  rotate {{ {rotation[0]} {rotation[1]} {rotation[2]} }}
 }}
 """
-        # Resolve output path
-        output_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
-        output_path = output_path.with_suffix('.nk')
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w') as f:
+        out_path = self.root_folder / output_path if not os.path.isabs(output_path) else Path(output_path)
+        out_path = out_path.with_suffix('.nk')
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, 'w') as f:
             f.write(camera_nk_content)
 
 
 class MoGeInference:
-    def __init__(self, model_path, root_folder='.', device='cuda', sensor_width_mm=36.0, sensor_height_mm=24.0):
-        # Existing initialization...
-        self.sensor_width_mm = sensor_width_mm
-        self.sensor_height_mm = sensor_height_mm
+    def __init__(
+            self,
+            model_path: str,
+            root_folder: str = '.',
+            device: str = 'cuda',
+            sensor_width_mm: float = 36.0,
+            sensor_height_mm: float = 24.0
+    ):
         """
         Initialize the MoGeInference class.
 
         Parameters:
-        - model_path (str or Path): Path to the pre-trained MoGe model.
+        - model_path (str or Path): Path or name of the pre-trained MoGe model.
         - root_folder (str or Path): Root folder for saving outputs.
         - device (str): Device to load the model on ('cuda' or 'cpu').
+        - sensor_width_mm (float): Sensor width in mm (defaults to 36.0).
+        - sensor_height_mm (float): Sensor height in mm (defaults to 24.0).
         """
+        self.sensor_width_mm = sensor_width_mm
+        self.sensor_height_mm = sensor_height_mm
+
         self.device = torch.device(device)
         self.model = MoGeModel.from_pretrained(model_path).to(self.device).eval()
         self.root_folder = Path(root_folder)
 
-    def infer(self, image, resolution_level=9, apply_mask=True):
+    def infer(
+            self,
+            image: np.ndarray,
+            resolution_level: int = 9,
+            apply_mask: bool = True,
+            fov_x: Optional[float] = None,
+            focal_length_mm: Optional[float] = None,
+            **model_kwargs
+    ) -> MoGeOutput:
         """
-        Run the model inference on an input image.
+        Run inference on a given image array (H, W, 3) in RGB.
 
         Parameters:
-        - image (np.ndarray): Input image as a NumPy array (H, W, 3).
-        - resolution_level (int): Resolution level for the inference (0-9).
-        - apply_mask (bool): Whether to apply the output mask.
+        - image (np.ndarray): The input image as a NumPy array in RGB, shape (H, W, 3).
+        - resolution_level (int): Resolution level [0..9] for the inference. Default=9.
+        - apply_mask (bool): Whether the model should produce a mask. Default=True.
+        - fov_x (float, optional): Known horizontal FOV in degrees. If provided, overrides focal_length_mm.
+        - focal_length_mm (float, optional): Known focal length in mm. If provided (and fov_x is not),
+          we convert this focal length to fov_x using the sensor_width_mm.
+        - **model_kwargs: Any additional keyword arguments supported by the new model.infer().
 
         Returns:
-        - output (MoGeOutput): An object containing all inference outputs.
+        - MoGeOutput: An object holding points, depth, mask, intrinsics, etc.
         """
-        # Convert image to tensor
+        # If user provided both fov_x & focal_length_mm, we prioritize fov_x
+        if fov_x is not None:
+            final_fov_x = fov_x
+        elif focal_length_mm is not None:
+            # Compute fov_x from focal length in mm
+            # fov_x (radians) = 2 * arctan( (sensor_width_mm/2) / focal_length_mm )
+            # convert to degrees: np.degrees(...)
+            final_fov_x = np.degrees(
+                2 * np.arctan((self.sensor_width_mm / 2) / focal_length_mm)
+            )
+        else:
+            # Neither passed; let the model estimate
+            final_fov_x = None
+
+        # Convert image to torch tensor (C,H,W) in [0..1] range
         image_tensor = torch.tensor(image / 255.0, dtype=torch.float32, device=self.device).permute(2, 0, 1)
 
-        # Inference
+        # Model inference
         with torch.no_grad():
-            output = self.model.infer(image_tensor, resolution_level=resolution_level, apply_mask=apply_mask)
+            output = self.model.infer(
+                image_tensor,
+                resolution_level=resolution_level,
+                apply_mask=apply_mask,
+                fov_x=final_fov_x,  # Pass computed or user-provided value
+                **model_kwargs
+            )
 
-        # Retrieve outputs
+        # Extract results
         points = output['points'].cpu().numpy()
         depth = output['depth'].cpu().numpy()
         mask = output['mask'].cpu().numpy() if 'mask' in output else None
         intrinsics = output['intrinsics'].cpu().numpy()
-        shift = output['shift'].cpu().numpy()[0]
 
-        # Create MoGeOutput object
+        # Create the MoGeOutput object
         inference_output = MoGeOutput(
             points=points,
             depth=depth,
@@ -610,43 +458,44 @@ class MoGeInference:
             root_folder=self.root_folder,
             sensor_width_mm=self.sensor_width_mm,
             sensor_height_mm=self.sensor_height_mm,
-            shift=shift  # Pass the shift value
+            shift=0  # or any shift you need
         )
-
         return inference_output
 
 
 if __name__ == '__main__':
     # Example usage
-    model_path = r'/model/model.pt'
+    model_path = r'E:\ai_projects\dust3r_project\MoGo\model\model.pt'
     root_folder = r'E:\ai_projects\dust3r_project\vision-forge\test\output_geo'
     inference = MoGeInference(model_path, root_folder=root_folder)
-    img = r'E:\ai_projects\dust3r_project\MoGo\MoGe\example_images\BooksCorridor.png'
-    img = r'C:\Users\Femto7000\Downloads\340045955Best-Indoor-Plants-Main.jpg'
-    img = r'C:/Users/Femto7000/nukesd/SD_Txt2Img/crystalClearXL_ccxl.safetensors/20241116_115144/20241116_115144_1_1.0001.png'
-    # img = r'I:\Recovered data 09-04 13_11_59\Actors\Jill Taylor\cover.jpg'
-    image = Image.open(img)
-    image_np = np.array(image.convert('RGB'))
 
-    # camera_params = processor.get_camera_pose_and_parameters(result["intrinsics"])
-    output = inference.infer(image_np, resolution_level=9, apply_mask=False)
-    # print("camera_params:", result["intrinsics"])
-    # Access camera data from the output
+    # Example image
+    img = r'C:/Users/Femto7000/nukesd/SD_Txt2Img/crystalClearXL_ccxl.safetensors/20241116_115144/20241116_115144_1_1.0001.png'
+    image_pil = Image.open(img).convert('RGB')
+    image_np = np.array(image_pil)
+
+    # Run inference with new argument (e.g. fov_x=50.0).
+    # You can also pass other arguments if your model supports them, e.g. threshold=...
+    output = inference.infer(
+        image_np,
+        resolution_level=9,
+        apply_mask=False,
+        focal_length_mm=75.0
+        # any other **model_kwargs
+    )
+
+    # Use the output
     camera_data = output.get_camera_data()
     print("Camera Data:", camera_data)
 
-    # Save outputs directly from the output object
-    output.save_mesh('meshes/mesh_filename', file_format='obj', remove_edge=True, rtol=0.02)
-    output.save_camera_nuke('nuke_camera/camera')
-    output.save_depth_map('depth_map/depth_map')
-    # Save the frustum as OBJ
+    # Saving various outputs
+    output.save_mesh('.output/mesh_filename2', file_format='obj', remove_edge=True, rtol=0.02)
+    output.save_camera_nuke('.output/camera')
+    output.save_depth_map('.output/depth_map')
     # output.save_frustum_as_obj('frustum/frustum_mesh')
 
-    # Get camera parameters
     camera_params = output.get_camera_parameters()
-
-    # Save camera data for Nuke directly from the output object
-    output.save_camera_nuke('nuke_camera/camera')
+    output.save_camera_nuke('.output/camera2')
 
     print("Camera Parameters:")
     print(f"Focal Length X (mm): {camera_params['focal_length_x_mm']}")

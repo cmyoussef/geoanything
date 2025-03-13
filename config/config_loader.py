@@ -8,6 +8,7 @@ class ConfigLoader(Base_ConfigLoader):
 
     def __init__(self):
         super().__init__()
+        self.script_paths['PanoramaMoGe'] = os.path.join(self.project_directory, 'executors', 'panoramamoge_executor.py')
         self.script_paths['PointCloudGen'] = os.path.join(self.project_directory, 'executors', 'pointcloudgenxecutor.py')
         self.script_paths['PointToGeo'] = os.path.join(self.project_directory, 'executors', 'pointstogeoexecutor.py')
         self.script_paths['PointCloudVisualizer'] = os.path.join(self.project_directory, 'executors', 'pointcloudvisualizer.py')
